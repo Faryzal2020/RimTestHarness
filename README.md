@@ -108,22 +108,25 @@ The HTTP protocol is `POST http://127.0.0.1:<port>/<command>` with a JSON object
 
 | Command | Arguments | Notes |
 |---|---|---|
-| `status` | | programState, scene, anyLongEvent, ticksGame, paused, timeSpeed, mapId/mapCount/mapSize, errors/warnings, headless, gameVersion, saveDataFolder, logPath (`Application.consoleLogPath`), ceProbe, ceBoundsShim, telemetry, activeMods |
+| `status` | | programState, scene, anyLongEvent, ticksGame, paused, timeSpeed, windowsForcePause, windows (open window types), mapId/mapCount/mapSize, errors/warnings, headless, gameVersion, saveDataFolder, logPath (`Application.consoleLogPath`), ceProbe, ceBoundsShim, telemetry, activeMods |
 | `log` | since, level (message/warning/error), limit, stack, contains | off-thread; own 50k-entry ring fed by `Application.logMessageReceivedThreaded` (the hook Verse.Log itself uses), cursor `next` |
-| `load_save` | name | `GameDataSaveLoader.LoadGame`; file must exist in `<savedata>/Saves` **[UNVERIFIED: not exercised]** |
-| `new_quicktest_game` | | queues the Play scene with `Current.Game=null` so `Root_Play.Start` runs `SetupForQuickTestPlay` **[UNVERIFIED: not exercised; quicktest was always started by `-quicktest`]** |
-| `main_menu` | | `GenScene.GoToMainMenu()` **[UNVERIFIED]** |
+| `save_game` | name | `GameDataSaveLoader.SaveGame` to `<savedata>/Saves/<name>.rws`; returns file size, fails if no file was written |
+| `load_save` | name | `GameDataSaveLoader.LoadGame`; file must exist in `<savedata>/Saves` (the error lists the saves there); poll `status` until Playing |
+| `new_quicktest_game` | | queues the Play scene with `Current.Game=null` (and `ProgramState=Entry`) so `Root_Play.Start` runs `SetupForQuickTestPlay`; works from the menu or a running game |
+| `main_menu` | | `GenScene.GoToMainMenu()` |
 | `pause`, `set_speed` | speed 0-4 or name | `TickManager.Pause()`, `CurTimeSpeed` setter |
 | `tick` | n, budgetMs (250) | pauses, then `TickManager.DoSingleTick()` n times, spread over frames by wall-clock budget; returns ticked/startTick/ticksGame |
 | `dev_mode` | on | `Prefs.DevMode` |
 | `set_debug` | field, value | any public static bool on `DebugSettings` (unlimitedPower, godMode, enableStoryteller, ...) |
 | `list_debug_actions` | path, depth, limit | walks `Dialog_Debug.rootNode` (`TrySetupNodeGraph`/`TrySetupChildren`); paths like `Actions\Finish All Research`, `Settings\Unlimited Power` |
-| `debug_action` | path, pawnId | `Dialog_Debug.GetNode(path).action()`; `ToolMapForPawns` nodes take pawnId; `ToolMap`/`ToolWorld` nodes are refused (they read `UI.MouseCell()`) |
-| `spawn_thing` | defName, x, z, stuff, count, rot, faction (player for buildings), power | `ThingMaker.MakeThing` + `SetFactionDirect` + `GenSpawn.Spawn`; forces `CompPowerTrader.PowerOn` when `power` or `DebugSettings.unlimitedPower` (unconnected traders are never ticked by a PowerNet) |
+| `debug_action` | path, pawnId | `Dialog_Debug.GetNode(path).action()`; `ToolMapForPawns` nodes take pawnId; `ToolMap`/`ToolWorld` nodes are refused (they read `UI.MouseCell()`). Returns `openedWindows`: many `...` actions only open a menu, which headless nobody can click and which force-pauses the game until closed |
+| `windows` | close (all / index / type) | list open windows with their menu options; `close=all` removes menus and pausing dialogs |
+| `choose_option` | label or index, window | picks an option in the topmost `FloatMenu` / `Dialog_DebugOptionListLister` the way a click does (close, then run); returns the next menu if one opens, so chained debug menus (faction -> points) can be driven. Map-tool options are refused |
+| `spawn_thing` | defName, x, z, stuff, count, rot, faction (player for buildings), power | stuff must be allowed for the def (`GenStuff.AllowedStuffsFor`); count above `stackLimit` is clamped and reported in `note`; `ThingMaker.MakeThing` + `SetFactionDirect` + `GenSpawn.Spawn`; forces `CompPowerTrader.PowerOn` when `power` or `DebugSettings.unlimitedPower` (unconnected traders are never ticked by a PowerNet) |
 | `spawn_pawn` | kindDef (Colonist), faction (player/hostile/none/defName/name), x, z, nearest (true), radius | `PawnGenerator.GeneratePawn` + `GenSpawn.Spawn`; moves to `CellFinder.StandableCellNear` if the cell is blocked |
 | `draft` | pawnId, on | `pawn.drafter.Drafted` |
 | `order_job` | pawnId, jobDef (Goto), targetId or targetX/targetZ, count | `JobMaker.MakeJob` + `Pawn_JobTracker.TryTakeOrderedJob`; also returns `reachable` (`Reachability.CanReach`) and `standable` |
-| `place_blueprint` | defName, x, z, rot, stuff | `GenConstruct.CanPlaceBlueprintAt` then `PlaceBlueprintForBuild` **[UNVERIFIED: not exercised]** |
+| `place_blueprint` | defName, x, z, rot, stuff | `GenConstruct.CanPlaceBlueprintAt` then `PlaceBlueprintForBuild`; stuff validated like `spawn_thing`; an identical blueprint on the cell is replaced (vanilla behaviour) |
 | `query_things` | id, defName, class, mapId, limit, deep | summary: id, def, class, pos, rot, hp, faction, stack, comps; pawn block (kind, name, dead, downed, drafted, curJob, health); turret block (targets, topRotation, gun, verb, warmup/cooldown, CE ammo/fire mode/active/holdFire, powerOn); `deep` adds inspect strings |
 | `cell_info`, `find_cell` | x, z, radius, clearRadius | terrain/standable/things at a cell; nearest standable cell with a clear radius |
 | `defs` | type, contains, limit | DefDatabase listing |
@@ -131,10 +134,10 @@ The HTTP protocol is `POST http://127.0.0.1:<port>/<command>` with a JSON object
 | `screenshot` | path | `ScreenCapture.CaptureScreenshot`; windowed only, refused headless |
 | `quit` | exitCode | responds first, then 400 ms later `SteamManager.ShutdownSteam()` + `Application.Quit(exitCode)`; the host's quit handler passes `UnityRuntime.App.ExitCode` to the process exit |
 | `turret_ammo` | id, ammoDef | CE `CompAmmoUser.ResetAmmoCount(AmmoDef)`; validates ammoDef against `CurAmmoSet.ammoTypes` |
-| `turret_fire_mode` | id, mode, aimMode | CE `CompFireModes.CurrentFireMode/CurrentAimMode` setters **[UNVERIFIED: not exercised]** |
-| `turret_order_attack` | id, targetId or x/z, clear | `Building_Turret.OrderAttack(LocalTargetInfo)` **[UNVERIFIED: not exercised]** |
+| `turret_fire_mode` | id, mode, aimMode | CE `CompFireModes.CurrentFireMode/CurrentAimMode` setters; bad names list the valid values |
+| `turret_order_attack` | id, targetId or x/z, clear | `Building_Turret.OrderAttack(LocalTargetInfo)`. Errors instead of silently doing nothing when the turret cannot hold a forced target (`CanSetForcedTarget` false: no `CompMannable`, i.e. every unmanned/auto turret, or not player-controlled) or when the game rejects the target (beyond range, below min range, outside a `CompFireArc`) |
 | `turret_fcs` | id, defName (AMC_FCS_Basic), replace | AMC: adds an FCS item into `CompTurretFCS.GetDirectlyHeldThings()` exactly as `JobDriver_LoadTurretFCS` does |
-| `turret_mode_swap` | id | AMC `CompTurretModeSwap.TrySwapMode()` via reflection; returns the replacement turret at the cell **[UNVERIFIED: not exercised]** |
+| `turret_mode_swap` | id | AMC `CompTurretModeSwap.TrySwapMode()` via reflection; returns the replacement turret at the cell |
 | `telemetry_start` | runId, note | opens `<savedata>/telemetry/<runId>.db` |
 | `telemetry_stop` | | flushes, writes `runs.stopped_tick`, checkpoints WAL, closes |
 | `telemetry_status` | | counters, pending, dropped |
@@ -142,7 +145,7 @@ The HTTP protocol is `POST http://127.0.0.1:<port>/<command>` with a JSON object
 | `turret_timeline` | id, limit, sinceTick | edge-triggered state rows merged with the turret's events |
 | `samples` | projId, every, fields, limit (max 5000) | decimated by `flight_ticks % every` |
 | `events` | since (seq), type, id, limit | |
-| `telemetry_sql` | sql (SELECT/WITH only), limit | read-only query on the open db; the runner's `sql` reads the file directly with `node:sqlite` |
+| `telemetry_sql` | sql (one SELECT/WITH statement), limit | read-only query on the open db (reader connection has `PRAGMA query_only=ON`); the runner's `sql` reads the file directly with `node:sqlite` |
 
 ## Telemetry design (§7)
 
@@ -167,6 +170,26 @@ Hooks (all resolved by name, missing CE = probe disabled, harness still loads): 
 
 Without a GPU, CE's `BoundsInjector.CollectTextures` fails for every pawn/plant texture (`Combat Extended :: AsyncGPUReadback failed for <tex>`, 425-546 errors at boot) and every later `BoundsInjector.BoundMap(graphic, type)` throws `BoundMap(,)`. That exception escapes `Verb_LaunchProjectileCE.CanHitTargetFrom` inside `Building_TurretGunCE.Tick`, so CE turrets never acquire a target headless (observed: `Exception ticking Turret_U20mmFlak38_Base ... BoundMap(,)`, zero bursts in 600 ticks). `CeHeadlessShim` installs a Harmony finalizer on `BoundMap` that swallows the exception and returns `(0.75, 0.75)` (the method returns the trimmed sprite's width/height fraction, later scaled by `drawSize` / `visualSizeRange`). It is active only with `-Headless` (or `-CEBoundsShim`; disable with `-NoCEBoundsShim`; `-CEBoundsFallback=0.6` changes the value) and `status.ceBoundsShim.shimmedCalls` counts its use. Consequence: headless CE collision heights for pawns/plants are approximate; use a windowed run for height-sensitive ballistics checks. **[UNVERIFIED]** how far the 0.75 default is from real per-texture bounds.
 
+## Verification record (2026-11-20, game 1.7.5013 rev802)
+
+Headless, `ludeon.rimworld, brrainz.harmony, ceteam.combatextended, faryzal2020.amcce_copy, rimtestharness.harness` (sessions `runner/runs/verify2..4`). Every harness command and runner subcommand was run, including the previously unverified ones:
+
+- `save_game` -> `load_save` round trip (5.4 MB save; tick, turrets, blueprints restored; 0 new errors; repeated twice). `main_menu` -> Entry; `new_quicktest_game` from the menu and from a running game (x3), ~5 s each.
+- `place_blueprint` (Wall with/without stuff, turret with rot=east, occupied cell refused). `turret_fire_mode` (BurstFire/Snapshot/SuppressFire, back to AutoFire). `turret_order_attack` on a manned `Turret_20mmFlak38_Base`: cell target produced `burst_begin target=cell` events; targetId, clear. `turret_mode_swap` on `Turret_U127mmMark16_Base` both directions plus the `mode_swap` telemetry event. `events since` paging, `samples every=3 fields=`, `telemetry_sql`, `turret_timeline`, `telemetry_stop`, `quit 4` -> exit code 4, `stop`.
+- `debug_action 'Actions\Execute raid with faction...'` -> `choose_option label=Barracuda` -> `choose_option label="200 points"`: 3 Barracuda raiders arrived after ticking.
+
+Bugs found and fixed in this pass:
+
+- `debug_action` reported success for actions that only open a menu; headless the menu stayed open invisibly and its `forcePause` froze the game at Normal speed. Now reported as `openedWindows`, visible in `status`, closable with `windows`, drivable with `choose_option`.
+- `turret_order_attack` reported a forced target that the turret dropped on its next tick (unmanned turrets) or that `OrderAttack` had silently rejected (out of range / below min range / fire arc). Now errors with the reason.
+- `telemetry_sql` "SELECT only" check could be bypassed with a second statement (`SELECT 1; CREATE TABLE ...` wrote to the db). Reader is now `query_only` and multi-statement SQL is refused.
+- `new_quicktest_game` from a running game logged `CameraDriver Awake threw: NullReferenceException` on every call (`load_save` did not). Fixed by setting `ProgramState=Entry` in the pre-load step.
+- `place_blueprint` with an unknown or disallowed stuff silently placed a stuffless blueprint; `spawn_thing` silently ignored stuff on non-stuff defs and clamped counts. Both now validate / report.
+- Thing labels in results carried rich-text tags (`Black<color=#999999FF>, Brave</color>`); stripped.
+- `turret_fire_mode` with a bad enum name returned a raw `ArgumentException`; now lists the valid values.
+
+Still not verified: `reload` telemetry events (no magazine emptied and reloaded), the windowed path after these changes, NuGet fallback build, Windows/Linux.
+
 ## Verification record (2026-10-16)
 
 Everything below was executed on this machine through `runner.js`; outputs are in `runner/runs/*/` (session.json, exit.json, runner-stdout.log, telemetry/*.db).
@@ -187,8 +210,8 @@ Verified:
 
 Not verified / open:
 
-- **[UNVERIFIED]** `load_save`, `new_quicktest_game`, `main_menu`, `place_blueprint`, `turret_fire_mode`, `turret_order_attack`, `turret_mode_swap`, `events since` paging, `telemetry_sql`: implemented against decompiled signatures but not exercised in a run.
-- **[UNVERIFIED]** `reload` events: `CompAmmoUser.LoadAmmo` never fired in the scenario (the magazine never emptied). `mode_swap` events: not exercised.
+- ~~`load_save`, `new_quicktest_game`, `main_menu`, `place_blueprint`, `turret_fire_mode`, `turret_order_attack`, `turret_mode_swap`, `events since` paging, `telemetry_sql` not exercised~~: verified 2026-11-20 (record above).
+- **[UNVERIFIED]** `reload` events: `CompAmmoUser.LoadAmmo` never fired in the scenario (the magazine never emptied). `mode_swap` events: verified 2026-11-20.
 - **[UNVERIFIED]** the NuGet fallback references (Krafs 1.7.4979-alpha, Lib.Harmony 2.3.3) compile the project when the game/workshop paths are absent; only the direct-reference path was built.
 - **[UNVERIFIED]** behaviour with Steam not running; all runs had the Steam client open.
 - **[UNVERIFIED]** CE's `burst_begin` fires twice per visible burst (e.g. ticks 3213 and 3295 before shots at 3295-3315): recorded as-is, cause not investigated (CE calls `BeginBurst` when `burstWarmupTicksLeft` reaches 0 and `TryStartShootSomething(canBeginBurstImmediately)` may call it again).

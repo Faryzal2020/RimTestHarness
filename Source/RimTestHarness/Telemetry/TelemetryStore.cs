@@ -90,6 +90,9 @@ CREATE INDEX IF NOT EXISTS ix_events_type ON events(type, tick);");
 
             reader = new SqliteConnection($"Data Source={DbPath}");
             reader.Open();
+            // The reader serves telemetry_sql, which accepts caller SQL. Microsoft.Data.Sqlite runs every statement in a
+            // command text, so a "SELECT 1; DROP TABLE ..." would otherwise write. query_only makes the connection refuse writes.
+            Exec(reader, "PRAGMA query_only=ON;");
 
             thread = new Thread(Loop) { IsBackground = true, Name = "RimTestHarness.Telemetry" };
             thread.Start();

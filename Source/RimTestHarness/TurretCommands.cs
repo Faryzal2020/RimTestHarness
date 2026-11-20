@@ -67,6 +67,13 @@ namespace RimTestHarness
             return t;
         }
 
+        static object ParseEnum(string typeName, string value, string argName)
+        {
+            var enumType = Reflect.T(typeName) ?? throw new CommandException(typeName + " not found (is Combat Extended loaded?)");
+            if (Enum.TryParse(enumType, value, true, out var val) && Enum.IsDefined(enumType, val)) return val;
+            throw new CommandException($"{argName} '{value}' is not a {enumType.Name}; options: {string.Join(", ", Enum.GetNames(enumType))}");
+        }
+
         public static void RegisterAll()
         {
             Commands.Register("turret_ammo", "Fill a CE turret magazine (CompAmmoUser.ResetAmmoCount). args: id, ammoDef (optional; must belong to the turret's ammo set)", a =>
@@ -100,16 +107,14 @@ namespace RimTestHarness
                 var fm = CompFireModes(t) ?? throw new CommandException("turret gun has no CompFireModes");
                 if (a.Has("mode"))
                 {
-                    var enumType = Reflect.T("CombatExtended.FireMode");
-                    var val = Enum.Parse(enumType, a.Str("mode"), true);
+                    var val = ParseEnum("CombatExtended.FireMode", a.Str("mode"), "mode");
                     var available = Reflect.Get(fm, "AvailableFireModes") as System.Collections.IList;
                     if (available != null && !available.Contains(val)) throw new CommandException($"fire mode {val} not available; options: {string.Join(", ", available.Cast<object>())}");
                     Reflect.Set(fm, "CurrentFireMode", val);
                 }
                 if (a.Has("aimMode"))
                 {
-                    var enumType = Reflect.T("CombatExtended.AimMode");
-                    Reflect.Set(fm, "CurrentAimMode", Enum.Parse(enumType, a.Str("aimMode"), true));
+                    Reflect.Set(fm, "CurrentAimMode", ParseEnum("CombatExtended.AimMode", a.Str("aimMode"), "aimMode"));
                 }
                 var d = new Dictionary<string, object>();
                 AddCeInfo((Building_Turret)t, d);
@@ -119,11 +124,36 @@ namespace RimTestHarness
             Commands.Register("turret_order_attack", "Force a turret to attack (Building_Turret.OrderAttack). args: id, targetId | x+z; pass clear=true to reset", a =>
             {
                 var t = Commands.ReqThing(a) as Building_Turret ?? throw new CommandException("not a Building_Turret");
+                bool clear = a.Bool("clear", false);
                 LocalTargetInfo target;
-                if (a.Bool("clear", false)) target = LocalTargetInfo.Invalid;
+                if (clear) target = LocalTargetInfo.Invalid;
                 else if (a.Has("targetId")) target = new LocalTargetInfo(Commands.ReqThing(a, "targetId"));
                 else target = new LocalTargetInfo(Commands.CellArg(a, t.Map));
+                // Vanilla and CE turrets drop a forced target on their next tick unless CanSetForcedTarget (a CompMannable
+                // and player control; decompiled Building_TurretGunCE.cs:127,422), and the game only offers the attack
+                // gizmo when it is true. Refuse instead of reporting a target that will vanish.
+                if (!clear)
+                {
+                    var canForce = Reflect.Member(t.GetType(), "CanSetForcedTarget") != null ? Reflect.Get(t, "CanSetForcedTarget") as bool? : null;
+                    if (canForce == false)
+                        throw new CommandException($"turret {t.thingIDNumber} ({t.def.defName}) cannot hold a forced target: CanSetForcedTarget is false (needs a CompMannable and player control; unmanned turrets pick their own targets). The game resets it on the next tick.");
+                }
                 t.OrderAttack(target);
+                // OrderAttack rejects out-of-range, below-minimum-range and out-of-fire-arc targets with only an on-screen
+                // message (Building_TurretGunCE.cs:335-390), leaving the previous forced target in place.
+                if (!clear && t.ForcedTarget != target)
+                {
+                    string reason = "OrderAttack did not accept the target";
+                    var vp = t.AttackVerb?.verbProps;
+                    if (vp != null)
+                    {
+                        float dist = (target.Cell - t.Position).LengthHorizontal;
+                        if (dist < vp.minRange) reason = $"target is {dist:F1} cells away, below the minimum range {vp.minRange}";
+                        else if (dist > vp.range) reason = $"target is {dist:F1} cells away, beyond the maximum range {vp.range}";
+                        else if (t is ThingWithComps twc && twc.AllComps.Any(c => c.GetType().Name == "CompFireArc")) reason = "target is probably outside the turret's fire arc (CompFireArc)";
+                    }
+                    throw new CommandException($"{reason}; forced target is still {(t.ForcedTarget.IsValid ? t.ForcedTarget.ToString() : "none")}");
+                }
                 return new { id = t.thingIDNumber, forcedTarget = Commands.TargetSummary(t.ForcedTarget), currentTarget = Commands.TargetSummary(t.CurrentTarget) };
             });
 

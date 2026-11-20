@@ -136,6 +136,8 @@ namespace RimTestHarness.Telemetry
                 var store = ReqStore(); store.Flush();
                 var sql = a.Req("sql").Trim();
                 if (!sql.StartsWith("select", StringComparison.OrdinalIgnoreCase) && !sql.StartsWith("with", StringComparison.OrdinalIgnoreCase)) throw new CommandException("only SELECT/WITH queries are allowed");
+                // One statement only: later statements would run (and be silently dropped by query_only) when the reader is disposed.
+                if (sql.TrimEnd().TrimEnd(';').Contains(';')) throw new CommandException("only a single statement is allowed (remove the ';')");
                 var rows = store.Query(sql);
                 int limit = a.Int("limit", 1000);
                 return new { count = rows.Count, rows = rows.Take(limit).ToList(), truncated = rows.Count > limit };

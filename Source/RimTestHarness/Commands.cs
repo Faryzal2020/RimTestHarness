@@ -142,7 +142,7 @@ namespace RimTestHarness
         public static object TargetSummary(LocalTargetInfo t)
         {
             if (!t.IsValid) return null;
-            if (t.HasThing) return new { id = t.Thing.thingIDNumber, def = t.Thing.def?.defName, label = t.Thing.LabelCap.ToString(), x = t.Cell.x, z = t.Cell.z };
+            if (t.HasThing) return new { id = t.Thing.thingIDNumber, def = t.Thing.def?.defName, label = t.Thing.LabelCap.ToString().StripTags(), x = t.Cell.x, z = t.Cell.z };
             return new { id = -1, def = (string)null, label = (string)null, x = t.Cell.x, z = t.Cell.z };
         }
 
@@ -153,7 +153,7 @@ namespace RimTestHarness
                 ["id"] = t.thingIDNumber,
                 ["def"] = t.def?.defName,
                 ["class"] = t.GetType().FullName,
-                ["label"] = t.LabelCap.ToString(),
+                ["label"] = t.LabelCap.ToString().StripTags(),
                 ["x"] = t.Position.x,
                 ["z"] = t.Position.z,
                 ["rot"] = t.Rotation.AsInt,
@@ -235,6 +235,9 @@ namespace RimTestHarness
                     ticksGame = tm?.TicksGame ?? -1,
                     paused = tm?.Paused,
                     timeSpeed = tm?.CurTimeSpeed.ToString(),
+                    // TickManager.Paused is also true while any open window has forcePause (or a long event forces it).
+                    windowsForcePause = SafeWindowsForcePause(),
+                    windows = SafeWindowTypes(),
                     mapId = map?.uniqueID ?? -1,
                     mapCount = game?.Maps?.Count ?? 0,
                     mapSize = map != null ? new { x = map.Size.x, z = map.Size.z } : null,
@@ -259,11 +262,31 @@ namespace RimTestHarness
             Register("log", "Log entries since cursor. args: since (seq), level (message|warning|error), limit (200), stack (false), contains", a =>
                 LogCapture.Query(a.Long("since", 0), LevelArg(a.Str("level", "message")), a.Int("limit", 200), a.Bool("stack", false), a.Str("contains")), offThread: true);
 
+            Register("save_game", "Save the current game to <savedatafolder>/Saves/<name>.rws (GameDataSaveLoader.SaveGame). args: name", a =>
+            {
+                ReqTick();
+                if (LongEventHandler.AnyEventNowOrWaiting) throw new CommandException("a long event is running; wait for status.anyLongEvent=false");
+                var name = a.Req("name");
+                foreach (var ch in System.IO.Path.GetInvalidFileNameChars()) if (name.IndexOf(ch) >= 0) throw new CommandException("invalid character in save name: " + ch);
+                var file = GenFilePaths.FilePathForSavedGame(name);
+                long errorsBefore = LogCapture.Errors;
+                // SaveGame catches its own exceptions and only logs them, so check the error count and the file.
+                GameDataSaveLoader.SaveGame(name);
+                var fi = new System.IO.FileInfo(file);
+                if (!fi.Exists) throw new CommandException("save did not produce " + file + "; see log level=error");
+                return new { name, file, bytes = fi.Length, ticksGame = Find.TickManager.TicksGame, newErrors = LogCapture.Errors - errorsBefore };
+            });
+
             Register("load_save", "Load <savedatafolder>/Saves/<name>.rws. args: name. Poll status until programState=Playing.", a =>
             {
                 var name = a.Req("name");
                 var file = GenFilePaths.FilePathForSavedGame(name);
-                if (!System.IO.File.Exists(file)) throw new CommandException("save not found: " + file);
+                if (!System.IO.File.Exists(file))
+                {
+                    var dir = System.IO.Path.GetDirectoryName(file);
+                    var have = System.IO.Directory.Exists(dir) ? System.IO.Directory.GetFiles(dir, "*.rws").Select(System.IO.Path.GetFileNameWithoutExtension) : Enumerable.Empty<string>();
+                    throw new CommandException($"save not found: {file}. Saves here: {string.Join(", ", have)}");
+                }
                 GameDataSaveLoader.LoadGame(name);
                 return new { queued = true, file };
             });
@@ -275,7 +298,11 @@ namespace RimTestHarness
                 Current.Game?.Dispose();
                 // Mirrors GameDataSaveLoader.LoadGame: pre-load action, then load the Play scene. Root_Play.Start sees
                 // Current.Game == null and calls SetupForQuickTestPlay() + InitNewGame() (decompiled Root_Play.cs:35-45).
-                LongEventHandler.QueueLongEvent(() => { Verse.Profile.MemoryUtility.ClearAllMapsAndWorld(); Current.Game = null; }, "Play", "GeneratingMap", doAsynchronously: true, null);
+                // ProgramState=Entry before the scene rebuild: otherwise the new CameraDriver.Awake -> ResetSize -> RootSize setter
+                // sees ProgramState.Playing with no long event pending and takes the zoom-to-mouse path before the Camera
+                // component exists (NullReferenceException in ApplyPositionToGameObject, observed on every Play->Play rebuild
+                // through this command). SetupForQuickTestPlay sets Entry itself, just later (decompiled Root_Play.cs:87).
+                LongEventHandler.QueueLongEvent(() => { Verse.Profile.MemoryUtility.ClearAllMapsAndWorld(); Current.Game = null; Current.ProgramState = ProgramState.Entry; }, "Play", "GeneratingMap", doAsynchronously: true, null);
                 return new { queued = true };
             });
 
@@ -378,18 +405,80 @@ namespace RimTestHarness
             {
                 var path = a.Req("path");
                 var node = Dialog_Debug.GetNode(path) ?? throw new CommandException("no debug action at path: " + path + ". Use list_debug_actions to browse.");
+                var windowsBefore = Find.WindowStack.Windows.ToList();
+                long before = LogCapture.Next;
                 if (node.actionType == DebugActionType.ToolMapForPawns && node.pawnAction != null)
                 {
                     var pawn = ReqPawn(a);
                     node.pawnAction(pawn);
-                    return new { invoked = node.Path, type = node.actionType.ToString(), pawn = pawn.thingIDNumber };
+                    return new { invoked = node.Path, type = node.actionType.ToString(), pawn = pawn.thingIDNumber, newLogEntries = LogCapture.Next - before, openedWindows = OpenedWindows(windowsBefore) };
                 }
                 if (node.action == null) throw new CommandException($"node '{node.Path}' has no direct action (type {node.actionType}, {node.children.Count} children)");
                 if (node.actionType != DebugActionType.Action)
                     throw new CommandException($"node '{node.Path}' is a {node.actionType} tool that reads the mouse cell; the harness cannot invoke it headless");
-                long before = LogCapture.Next;
                 node.action();
-                return new { invoked = node.Path, type = node.actionType.ToString(), newLogEntries = LogCapture.Next - before };
+                // Many "..." actions only open a menu (Dialog_DebugOptionListLister / FloatMenu). Headless nobody can click
+                // it, and a forcePause window freezes the game, so report it: use choose_option or windows close=all.
+                return new { invoked = node.Path, type = node.actionType.ToString(), newLogEntries = LogCapture.Next - before, openedWindows = OpenedWindows(windowsBefore) };
+            });
+
+            Register("windows", "List open UI windows (menus opened by debug actions stay open headless; forcePause ones freeze time). args: close (all | index | type name)", a =>
+            {
+                var ws = Find.WindowStack;
+                var close = a.Str("close");
+                var closed = new List<string>();
+                if (close != null)
+                {
+                    var list = ws.Windows.ToList();
+                    IEnumerable<Window> targets;
+                    if (close.Equals("all", StringComparison.OrdinalIgnoreCase)) targets = list.Where(IsClosableWindow);
+                    else if (int.TryParse(close, out var idx))
+                    {
+                        if (idx < 0 || idx >= list.Count) throw new CommandException($"window index {idx} out of range (0..{list.Count - 1})");
+                        targets = new[] { list[idx] };
+                    }
+                    else targets = list.Where(w => w.GetType().Name.Equals(close, StringComparison.OrdinalIgnoreCase) || w.GetType().FullName == close);
+                    foreach (var w in targets.ToList()) { if (ws.TryRemove(w, doCloseSound: false)) closed.Add(w.GetType().Name); }
+                    if (closed.Count == 0 && !close.Equals("all", StringComparison.OrdinalIgnoreCase)) throw new CommandException("no open window matches '" + close + "'");
+                }
+                return new { closed, windowsForcePause = ws.WindowsForcePause, windows = WindowList() };
+            });
+
+            Register("choose_option", "Pick an option in an open menu window (FloatMenu or debug option list), as a click would. args: label (exact, else unique case-insensitive substring) | index, window (index in windows; default topmost menu)", a =>
+            {
+                var list = Find.WindowStack.Windows.ToList();
+                Window w;
+                if (a.Has("window"))
+                {
+                    int wi = a.Int("window", -1);
+                    if (wi < 0 || wi >= list.Count) throw new CommandException($"window index {wi} out of range (0..{list.Count - 1})");
+                    w = list[wi];
+                }
+                else w = list.LastOrDefault(x => x is FloatMenu || x is Dialog_DebugOptionListLister) ?? throw new CommandException("no menu window is open");
+                var opts = MenuOptions(w) ?? throw new CommandException($"window {w.GetType().Name} is not a menu with options");
+                int index;
+                if (a.Has("index")) index = a.Int("index", -1);
+                else
+                {
+                    var label = a.Req("label");
+                    index = opts.FindIndex(o => o.label == label);
+                    if (index < 0)
+                    {
+                        var hits = opts.Select((o, i) => (o, i)).Where(p => p.o.label != null && p.o.label.IndexOf(label, StringComparison.OrdinalIgnoreCase) >= 0).ToList();
+                        if (hits.Count == 1) index = hits[0].i;
+                        else throw new CommandException(hits.Count == 0 ? $"no option '{label}'. Options: {string.Join(" | ", opts.Select(o => o.label))}" : $"'{label}' matches {hits.Count} options: {string.Join(" | ", hits.Select(h => h.o.label))}");
+                    }
+                }
+                if (index < 0 || index >= opts.Count) throw new CommandException($"option index {index} out of range (0..{opts.Count - 1})");
+                var chosen = opts[index];
+                if (chosen.disabled) throw new CommandException($"option '{chosen.label}' is disabled");
+                if (chosen.tool) throw new CommandException($"option '{chosen.label}' is a map tool that reads the mouse cell; the harness cannot invoke it headless");
+                var before = Find.WindowStack.Windows.ToList();
+                long logBefore = LogCapture.Next;
+                // Same order as a click: Dialog_DebugOptionLister.DebugAction closes then runs the action; FloatMenu removes itself after Chosen.
+                Find.WindowStack.TryRemove(w, doCloseSound: false);
+                chosen.invoke();
+                return new { chosen = chosen.label, index, window = w.GetType().Name, newLogEntries = LogCapture.Next - logBefore, openedWindows = OpenedWindows(before) };
             });
 
             // -------- spawning
@@ -399,10 +488,7 @@ namespace RimTestHarness
                 var defName = a.Req("defName");
                 var def = DefDatabase<ThingDef>.GetNamedSilentFail(defName) ?? throw new CommandException("no ThingDef " + defName);
                 var cell = CellArg(a, map);
-                ThingDef stuff = null;
-                if (a.Has("stuff")) stuff = DefDatabase<ThingDef>.GetNamedSilentFail(a.Str("stuff")) ?? throw new CommandException("no stuff def " + a.Str("stuff"));
-                if (def.MadeFromStuff && stuff == null) stuff = GenStuff.DefaultStuffFor(def);
-                if (!def.MadeFromStuff) stuff = null;
+                var stuff = StuffArg(a, def);
                 var thing = ThingMaker.MakeThing(def, stuff);
                 int count = a.Int("count", 1);
                 if (count > 1) thing.stackCount = Math.Min(count, def.stackLimit);
@@ -416,7 +502,9 @@ namespace RimTestHarness
                 // Unconnected CompPowerTraders are never ticked by a PowerNet, so DebugSettings.unlimitedPower alone leaves
                 // them off (PowerNet.cs:183 only powers traders inside a net). Force PowerOn when requested or when unlimitedPower is set.
                 if (a.Bool("power", DebugSettings.unlimitedPower)) ForcePower(spawned, true);
-                return ThingSummary(spawned);
+                var summary = ThingSummary(spawned);
+                if (count > def.stackLimit) { summary["requestedCount"] = count; summary["note"] = $"count clamped to stackLimit {def.stackLimit} (one stack per call)"; }
+                return summary;
             });
 
             Register("power", "Force a CompPowerTrader on/off (for unconnected test buildings). args: id, on (true)", a =>
@@ -469,7 +557,7 @@ namespace RimTestHarness
                 var def = DefDatabase<ThingDef>.GetNamedSilentFail(a.Req("defName")) ?? throw new CommandException("no ThingDef " + a.Str("defName"));
                 var cell = CellArg(a, map);
                 var rot = RotArg(a);
-                ThingDef stuff = a.Has("stuff") ? DefDatabase<ThingDef>.GetNamedSilentFail(a.Str("stuff")) : (def.MadeFromStuff ? GenStuff.DefaultStuffFor(def) : null);
+                var stuff = StuffArg(a, def);
                 var report = GenConstruct.CanPlaceBlueprintAt(def, cell, rot, map, godMode: false, null, null, stuff);
                 if (!report.Accepted) throw new CommandException("cannot place: " + report.Reason);
                 var bp = GenConstruct.PlaceBlueprintForBuild(def, cell, map, rot, Faction.OfPlayer, stuff);
@@ -578,6 +666,22 @@ namespace RimTestHarness
             Telemetry.TelemetryCommands.RegisterAll();
         }
 
+        /// <summary>Stuff for a def: the given defName (must exist and be allowed for the def), else the default stuff; null for non-stuff defs.</summary>
+        static ThingDef StuffArg(Args a, ThingDef def)
+        {
+            var name = a.Str("stuff");
+            if (!def.MadeFromStuff)
+            {
+                if (name != null) throw new CommandException($"{def.defName} is not made from stuff; omit 'stuff'");
+                return null;
+            }
+            if (name == null) return GenStuff.DefaultStuffFor(def);
+            var stuff = DefDatabase<ThingDef>.GetNamedSilentFail(name) ?? throw new CommandException("no stuff def " + name);
+            if (!GenStuff.AllowedStuffsFor(def).Contains(stuff))
+                throw new CommandException($"{name} is not an allowed stuff for {def.defName}. Allowed: {string.Join(", ", GenStuff.AllowedStuffsFor(def).Select(s => s.defName))}");
+            return stuff;
+        }
+
         static CompPowerTrader ForcePower(Thing t, bool on)
         {
             var comp = t.TryGetComp<CompPowerTrader>();
@@ -592,6 +696,56 @@ namespace RimTestHarness
             return Find.TickManager;
         }
 
+        // ------------------------------------------------------------------ windows
+
+        sealed class MenuOpt { public string label; public bool disabled; public bool tool; public Action invoke; }
+
+        static List<MenuOpt> MenuOptions(Window w)
+        {
+            if (w is FloatMenu fm)
+            {
+                var opts = HarmonyLib.Traverse.Create(fm).Field("options").GetValue<List<FloatMenuOption>>();
+                return opts?.Select(o => new MenuOpt { label = o.Label?.StripTags(), disabled = o.Disabled, invoke = () => o.Chosen(false, null) }).ToList();
+            }
+            if (w is Dialog_DebugOptionListLister dl)
+            {
+                var opts = HarmonyLib.Traverse.Create(dl).Field("options").GetValue<List<DebugMenuOption>>();
+                return opts?.Select(o => new MenuOpt { label = o.label, tool = o.mode == DebugMenuOptionMode.Tool, invoke = o.method }).ToList();
+            }
+            return null;
+        }
+
+        // The always-present windows (e.g. the play scene's own UI) are not closed by close=all.
+        static bool IsClosableWindow(Window w) => w is FloatMenu || w is Dialog_DebugOptionLister || w.forcePause || w.absorbInputAroundWindow || w.closeOnClickedOutside;
+
+        static object WindowSummary(Window w, int index)
+        {
+            var opts = MenuOptions(w);
+            return new
+            {
+                index,
+                type = w.GetType().FullName,
+                forcePause = w.forcePause,
+                optionCount = opts?.Count,
+                options = opts?.Take(100).Select(o => o.tool ? o.label + " [tool]" : o.disabled ? o.label + " [disabled]" : o.label).ToList(),
+            };
+        }
+
+        static List<object> WindowList()
+        {
+            var ws = Find.WindowStack?.Windows;
+            if (ws == null) return new List<object>();
+            return ws.Select((w, i) => WindowSummary(w, i)).ToList();
+        }
+
+        static List<object> OpenedWindows(List<Window> before)
+        {
+            var now = Find.WindowStack.Windows;
+            var list = new List<object>();
+            for (int i = 0; i < now.Count; i++) if (!before.Contains(now[i])) list.Add(WindowSummary(now[i], i));
+            return list;
+        }
+
         static int LevelArg(string level) => level?.ToLowerInvariant() switch { "warning" => 1, "error" => 2, _ => 0 };
 
         static bool HasChildGetter(DebugActionNode n)
@@ -601,6 +755,8 @@ namespace RimTestHarness
         static readonly FieldInfo AccessToolsChildGetter = typeof(DebugActionNode).GetField("childGetter", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
 
         static string SafeLongEventText() { try { var ev = HarmonyLib.AccessTools.Field(typeof(LongEventHandler), "currentEvent")?.GetValue(null); return ev == null ? null : HarmonyLib.Traverse.Create(ev).Field("eventTextKey").GetValue<string>(); } catch { return null; } }
+        static bool? SafeWindowsForcePause() { try { return Find.WindowStack?.WindowsForcePause; } catch { return null; } }
+        static List<string> SafeWindowTypes() { try { return Find.WindowStack?.Windows.Select(w => w.GetType().Name).ToList(); } catch { return null; } }
         static string SafeLogPath() { try { return Application.consoleLogPath; } catch { return null; } }
     }
 }
