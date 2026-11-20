@@ -1,0 +1,13 @@
+# Test sessions (isolated save-data folders, logs, telemetry databases)
+runner/runs/
+runner/.last-session
+
+# Build intermediates
+**/obj/
+**/bin/
+
+# IDE / OS
+.vs/
+.idea/
+*.user
+.DS_Store

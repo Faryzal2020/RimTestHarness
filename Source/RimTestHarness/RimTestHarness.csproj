@@ -1,0 +1,79 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!--
+    Target: net10.0. RimWorld 1.7 runs on CoreCLR (WaylithClr, net10.0); the 1.7 Harmony mod
+    (0Harmony.dll, Harmony 3.0.0-rc.3) and Krafs.Rimworld.Ref 1.7.x are net10.0 as well.
+    References come from the installed game and workshop by default (exact build match);
+    set GameRoot/WorkshopRoot or fall back to the NuGet ref packages when they are absent.
+  -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <AssemblyName>RimTestHarness</AssemblyName>
+    <RootNamespace>RimTestHarness</RootNamespace>
+    <LangVersion>latest</LangVersion>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+    <AppendRuntimeIdentifierToOutputPath>false</AppendRuntimeIdentifierToOutputPath>
+    <OutputPath>..\..\Assemblies\</OutputPath>
+    <GenerateDependencyFile>false</GenerateDependencyFile>
+    <ProduceReferenceAssembly>false</ProduceReferenceAssembly>
+    <CopyLocalLockFileAssemblies>false</CopyLocalLockFileAssemblies>
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+    <DebugType>embedded</DebugType>
+    <DebugSymbols>true</DebugSymbols>
+    <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
+    <NoWarn>$(NoWarn);CS1701;CS1702;CS8632</NoWarn>
+    <!-- Keep local machine paths out of the embedded PDB of the committed DLL. -->
+    <PathMap>$(MSBuildProjectDirectory)=RimTestHarness</PathMap>
+    <GameRoot Condition="'$(GameRoot)' == ''">$(MSBuildProjectDirectory)/../../../..</GameRoot>
+    <!-- Folder holding Assembly-CSharp.dll. Pass -p:GameManaged=... to override. macOS 1.7 (verified):
+         RimWorld.app/Contents/MacOS. Windows/Linux (UNVERIFIED layouts): next to the executable, or the
+         Unity-era <Exe>_Data/Managed folder. -->
+    <GameManaged Condition="'$(GameManaged)' == '' and Exists('$(GameRoot)/RimWorld.app/Contents/MacOS/Assembly-CSharp.dll')">$(GameRoot)/RimWorld.app/Contents/MacOS</GameManaged>
+    <GameManaged Condition="'$(GameManaged)' == '' and Exists('$(GameRoot)/Assembly-CSharp.dll')">$(GameRoot)</GameManaged>
+    <GameManaged Condition="'$(GameManaged)' == '' and Exists('$(GameRoot)/RimWorldWin64_Data/Managed/Assembly-CSharp.dll')">$(GameRoot)/RimWorldWin64_Data/Managed</GameManaged>
+    <GameManaged Condition="'$(GameManaged)' == '' and Exists('$(GameRoot)/RimWorldLinux_Data/Managed/Assembly-CSharp.dll')">$(GameRoot)/RimWorldLinux_Data/Managed</GameManaged>
+    <GameManaged Condition="'$(GameManaged)' == ''">$(GameRoot)/RimWorld.app/Contents/MacOS</GameManaged>
+    <WorkshopRoot Condition="'$(WorkshopRoot)' == ''">$(GameRoot)/../../workshop/content/294100</WorkshopRoot>
+    <HarmonyDll>$(WorkshopRoot)/2009463077/1.7/Assemblies/0Harmony.dll</HarmonyDll>
+    <CombatExtendedDll>$(WorkshopRoot)/2890901044/Assemblies/CombatExtended.dll</CombatExtendedDll>
+  </PropertyGroup>
+
+  <!-- Game assemblies: prefer the installed 1.7 build, else the Krafs 1.7 reference package. -->
+  <ItemGroup Condition="Exists('$(GameManaged)/Assembly-CSharp.dll')">
+    <Reference Include="Assembly-CSharp"><HintPath>$(GameManaged)/Assembly-CSharp.dll</HintPath><Private>False</Private></Reference>
+  </ItemGroup>
+  <!-- The 1.7 CoreCLR engine's Unity replacement. If a platform lacks these files it is not the same
+       engine build, and the net10.0 harness DLL will most likely not load there. -->
+  <ItemGroup Condition="Exists('$(GameManaged)/UnityStubs.dll')">
+    <Reference Include="UnityStubs"><HintPath>$(GameManaged)/UnityStubs.dll</HintPath><Private>False</Private></Reference>
+  </ItemGroup>
+  <ItemGroup Condition="Exists('$(GameManaged)/Brutal.Core.Maths.dll')">
+    <Reference Include="Brutal.Core.Maths"><HintPath>$(GameManaged)/Brutal.Core.Maths.dll</HintPath><Private>False</Private></Reference>
+  </ItemGroup>
+  <ItemGroup Condition="!Exists('$(GameManaged)/Assembly-CSharp.dll')">
+    <PackageReference Include="Krafs.Rimworld.Ref" Version="1.7.4979-alpha" />
+  </ItemGroup>
+
+  <!-- Harmony: the exact 1.7 runtime build when installed, else the NuGet package (compile only). -->
+  <ItemGroup Condition="Exists('$(HarmonyDll)')">
+    <Reference Include="0Harmony"><HintPath>$(HarmonyDll)</HintPath><Private>False</Private></Reference>
+  </ItemGroup>
+  <ItemGroup Condition="!Exists('$(HarmonyDll)')">
+    <PackageReference Include="Lib.Harmony" Version="2.3.3" ExcludeAssets="runtime" />
+  </ItemGroup>
+
+  <!-- Combat Extended is optional. The code never references its types directly (all access is by
+       name through Harmony/reflection), so this reference only helps IDE navigation. -->
+  <ItemGroup Condition="Exists('$(CombatExtendedDll)')">
+    <Reference Include="CombatExtended"><HintPath>$(CombatExtendedDll)</HintPath><Private>False</Private></Reference>
+  </ItemGroup>
+
+  <!-- SQLite stack copied from RimSearcher_DataMod (Microsoft.Data.Sqlite 8.0.31 netstandard2.0,
+       SQLitePCLRaw 2.1.13 core + provider.dynamic_cdecl). Shipped in ../../Assemblies, natives in ../../Native. -->
+  <ItemGroup>
+    <Reference Include="Microsoft.Data.Sqlite"><HintPath>..\..\Assemblies\Microsoft.Data.Sqlite.dll</HintPath><Private>False</Private></Reference>
+    <Reference Include="SQLitePCLRaw.core"><HintPath>..\..\Assemblies\SQLitePCLRaw.core.dll</HintPath><Private>False</Private></Reference>
+    <Reference Include="SQLitePCLRaw.provider.dynamic_cdecl"><HintPath>..\..\Assemblies\SQLitePCLRaw.provider.dynamic_cdecl.dll</HintPath><Private>False</Private></Reference>
+  </ItemGroup>
+</Project>

@@ -1,0 +1,9 @@
+{
+  "name": "rimtestharness-runner",
+  "version": "0.1.0",
+  "description": "Launches RimWorld 1.7 with an isolated save-data folder and drives the RimTestHarness mod over loopback HTTP. No dependencies (Node >= 22.5 for node:sqlite).",
+  "type": "module",
+  "bin": { "rimtest": "./runner.js" },
+  "scripts": { "start": "node runner.js" },
+  "engines": { "node": ">=22.5" }
+}
