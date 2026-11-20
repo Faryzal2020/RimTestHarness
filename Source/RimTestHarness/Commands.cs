@@ -253,6 +253,7 @@ namespace RimTestHarness
                     port = HarnessMod.Port,
                     ceProbe = Telemetry.CeProbe.Available,
                     ceProbeLog = Telemetry.CeProbe.InstallLog,
+                    headlessLongEvents = new { enabled = HeadlessLongEvents.Enabled, released = HeadlessLongEvents.Released, last = HeadlessLongEvents.LastReleased },
                     ceBoundsShim = new { enabled = Telemetry.CeHeadlessShim.Enabled, shimmedCalls = Telemetry.CeHeadlessShim.ShimmedCalls, log = Telemetry.CeHeadlessShim.Log },
                     telemetry = Telemetry.TelemetryStore.StatusSummary(),
                     activeMods = LoadedModManager.RunningModsListForReading.Select(m => m.PackageId).ToList(),

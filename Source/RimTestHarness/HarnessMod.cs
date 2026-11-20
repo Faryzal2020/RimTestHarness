@@ -30,6 +30,7 @@ namespace RimTestHarness
                 MainThread.Install(Harmony);
                 Telemetry.CeProbe.TryInstall(Harmony);
                 Telemetry.CeHeadlessShim.TryInstall(Harmony);
+                HeadlessLongEvents.TryInstall(Harmony);
                 Commands.RegisterAll();
 
                 Port = DefaultPort;

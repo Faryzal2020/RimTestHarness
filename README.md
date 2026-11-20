@@ -46,6 +46,7 @@ RimTestHarness/
   Source/RimTestHarness/          C# project (net10.0)
     HarnessMod.cs                 Verse.Mod entry: Harmony, log capture, main-thread pump, CE probe, HTTP server, harness.port
     MainThread.cs                 ConcurrentQueue drained by a Harmony postfix on Verse.Root.Update; multi-frame jobs
+    HeadlessLongEvents.cs         headless-only prefix that lets synchronous long events (autosave) run (see "Headless long events")
     HarnessServer.cs              HttpListener on 127.0.0.1:<port>
     Commands.cs / Args.cs         command table (lifecycle, time, debug, spawn, query)
     TurretCommands.cs             CE/AMC turret commands (reflection by type name)
@@ -108,7 +109,7 @@ The HTTP protocol is `POST http://127.0.0.1:<port>/<command>` with a JSON object
 
 | Command | Arguments | Notes |
 |---|---|---|
-| `status` | | programState, scene, anyLongEvent, ticksGame, paused, timeSpeed, windowsForcePause, windows (open window types), mapId/mapCount/mapSize, errors/warnings, headless, gameVersion, saveDataFolder, logPath (`Application.consoleLogPath`), ceProbe, ceBoundsShim, telemetry, activeMods |
+| `status` | | programState, scene, anyLongEvent, ticksGame, paused, timeSpeed, windowsForcePause, windows (open window types), mapId/mapCount/mapSize, errors/warnings, headless, gameVersion, saveDataFolder, logPath (`Application.consoleLogPath`), ceProbe, ceBoundsShim, headlessLongEvents (enabled, released, last), telemetry, activeMods |
 | `log` | since, level (message/warning/error), limit, stack, contains | off-thread; own 50k-entry ring fed by `Application.logMessageReceivedThreaded` (the hook Verse.Log itself uses), cursor `next` |
 | `save_game` | name | `GameDataSaveLoader.SaveGame` to `<savedata>/Saves/<name>.rws`; returns file size, fails if no file was written |
 | `load_save` | name | `GameDataSaveLoader.LoadGame`; file must exist in `<savedata>/Saves` (the error lists the saves there); poll `status` until Playing |
@@ -169,6 +170,19 @@ Hooks (all resolved by name, missing CE = probe disabled, harness still loads): 
 ### Headless CE: the bounds shim
 
 Without a GPU, CE's `BoundsInjector.CollectTextures` fails for every pawn/plant texture (`Combat Extended :: AsyncGPUReadback failed for <tex>`, 425-546 errors at boot) and every later `BoundsInjector.BoundMap(graphic, type)` throws `BoundMap(,)`. That exception escapes `Verb_LaunchProjectileCE.CanHitTargetFrom` inside `Building_TurretGunCE.Tick`, so CE turrets never acquire a target headless (observed: `Exception ticking Turret_U20mmFlak38_Base ... BoundMap(,)`, zero bursts in 600 ticks). `CeHeadlessShim` installs a Harmony finalizer on `BoundMap` that swallows the exception and returns `(0.75, 0.75)` (the method returns the trimmed sprite's width/height fraction, later scaled by `drawSize` / `visualSizeRange`). It is active only with `-Headless` (or `-CEBoundsShim`; disable with `-NoCEBoundsShim`; `-CEBoundsFallback=0.6` changes the value) and `status.ceBoundsShim.shimmedCalls` counts its use. Consequence: headless CE collision heights for pawns/plants are approximate; use a windowed run for height-sensitive ballistics checks. **[UNVERIFIED]** how far the 0.75 default is from real per-texture bounds.
+
+## Headless long events: the autosave stall
+
+`RimWorld.Autosaver.AutosaverTick` queues `DoAutosave` every `Prefs.AutosaveIntervalDays * 60000` ticks as a **synchronous** long event with text (`"Autosaving"`, `doAsynchronously: false`). `LongEventHandler.UpdateCurrentSynchronousEvent` returns early while `QueuedLongEvent.ShouldWaitUntilDisplayed` (`!alreadyDisplayed && UseStandardWindow && eventText != ""`) is true, and the only code that sets `alreadyDisplayed` is `DrawLongEventWindowContents` on an `OnGUI` repaint event. Headless there is no repaint, so the event stayed current forever: `status.anyLongEvent=true` / `longEventText="Autosaving"`, `LongEventHandler.ForcePause` kept the game paused, and `tick`/`save_game` were refused from tick 60000 on (observed: stuck at 60327, no save written). `save_game` + `load_save` only appeared to help because loading replaces the stuck event.
+
+`HeadlessLongEvents` (active only with `-Headless`) is a Harmony prefix on `LongEventHandler.LongEventsUpdate` that sets `alreadyDisplayed=true` on the current event when `ShouldWaitUntilDisplayed` is true, i.e. what the missing repaint would have done; the event runs in that same update. It covers every synchronous standard-window long event, not just autosave, and autosaves are really written (`<savedata>/Saves/Autosave-N.rws`). `status.headlessLongEvents.released` counts released events, `last` is the last one's text key. Windowed runs are untouched.
+
+## Verification record (2026-11-21, headless autosave stall)
+
+Game 1.7.5013 rev802, headless, `ludeon.rimworld, brrainz.harmony, rimtestharness.harness`.
+
+- Before the fix (session `runner/runs/autosave-repro`): `tick n=60000` from tick 327 -> 60327, then `status` `anyLongEvent=true, longEventText=Autosaving, paused=true`, `tick` refused with `a long event is running`; still stuck seconds later; no `Saves/` folder.
+- After the fix (`runner/runs/autosave-fix2`): `tick n=20000` x7, 123 -> 140123 (1.1-8.8 s per chunk); after every chunk `anyLongEvent=false`, 0 errors; `headlessLongEvents.released` 0 at boot, 1 after tick 60000, 2 after 120000, `last=Autosaving`; `Autosave-1.rws` / `Autosave-2.rws` written (~14 MB). Then `save_game manual` (0 new errors), `load_save Autosave-2` -> Playing at tick 120214, `tick 5000`, 0 errors; `quit 0` -> exit code 0. The single warning in every run is the engine's `UnityStubs Graphics.DrawTexture` stub notice logged before the harness loads.
 
 ## Verification record (2026-11-20, game 1.7.5013 rev802)
 
