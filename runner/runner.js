@@ -99,11 +99,29 @@ async function tryStatus(session) { try { const r = await call(session, 'status'
 function gameVersion(gameRoot) {
   try { return fs.readFileSync(path.join(gameRoot, 'Version.txt'), 'utf8').trim(); } catch { return null; }
 }
+function resolveModIds(mods, gameRoot) {
+  return mods.map(m => {
+    if (m.toLowerCase() === 'ceteam.combatextended') {
+      const localCe = path.join(gameRoot, 'Mods', 'CombatExtended');
+      const localDll = path.join(localCe, 'Assemblies', 'CombatExtended.dll');
+      const workshopDll = path.resolve(gameRoot, '..', '..', 'workshop', 'content', '294100', '2890901044', 'Assemblies', 'CombatExtended.dll');
+      if (fs.existsSync(localCe) && !fs.existsSync(localDll) && fs.existsSync(workshopDll)) {
+        console.error('note: local Mods/CombatExtended is uncompiled; using ceteam.combatextended_steam (Workshop 2890901044)');
+        return 'ceteam.combatextended_steam';
+      }
+    }
+    return m;
+  });
+}
 function writeModsConfig(savedata, mods, version) {
   const cfg = path.join(savedata, 'Config'); fs.mkdirSync(cfg, { recursive: true });
   // Format: Verse.ModsConfig.ModsConfigData { version, activeMods, knownExpansions } saved via DirectXmlSaver.
   const xml = `<?xml version="1.0" encoding="utf-8"?>\n<ModsConfigData>\n  <version>${version ?? ''}</version>\n  <activeMods>\n${mods.map(m => `    <li>${m}</li>`).join('\n')}\n  </activeMods>\n  <knownExpansions>\n  </knownExpansions>\n</ModsConfigData>\n`;
   fs.writeFileSync(path.join(cfg, 'ModsConfig.xml'), xml);
+  const prefsPath = path.join(cfg, 'Prefs.xml');
+  if (!fs.existsSync(prefsPath)) {
+    fs.writeFileSync(prefsPath, `<?xml version="1.0" encoding="utf-8"?>\n<PrefsData>\n  <runInBackground>True</runInBackground>\n</PrefsData>\n`);
+  }
   return path.join(cfg, 'ModsConfig.xml');
 }
 // Fallback only: once the game is up, `status.logPath` is used instead.
@@ -134,7 +152,8 @@ function findGameExe(gameRoot, opts) {
 async function cmdLaunch(opts) {
   const gameRoot = opts.game ? path.resolve(opts.game) : DEFAULT_GAME_ROOT;
   const exe = findGameExe(gameRoot, opts);
-  const mods = opts.mods ? String(opts.mods).split(',').map(s => s.trim()).filter(Boolean) : DEFAULT_MODS;
+  const rawMods = opts.mods ? String(opts.mods).split(',').map(s => s.trim()).filter(Boolean) : DEFAULT_MODS;
+  const mods = resolveModIds(rawMods, gameRoot);
   if (!mods.includes('rimtestharness.harness')) console.error('warning: rimtestharness.harness is not in the mod list; harness commands will not work');
   const stamp = new Date().toISOString().replace(/[-:]/g, '').replace(/\..+/, '').replace('T', '_');
   const savedata = opts.savedata ? path.resolve(opts.savedata) : path.join(__dirname, 'runs', stamp);
@@ -156,7 +175,7 @@ async function cmdLaunch(opts) {
     detached: true, stdio: 'ignore', cwd: path.dirname(exe), windowsHide: true,
   });
   sup.unref();
-  const session = { savedata, port, gameRoot, exe, args, mods, modsConfig, supervisorPid: sup.pid, startedAt: new Date().toISOString(), stdoutLog, playerLog: defaultPlayerLog() };
+  const session = { savedata, requestedPort: port, gameRoot, exe, args, mods, modsConfig, supervisorPid: sup.pid, startedAt: new Date().toISOString(), stdoutLog, playerLog: defaultPlayerLog() };
   writeSession(savedata, session);
   console.error(`launched supervisor pid ${sup.pid}: ${exe} ${args.join(' ')}`);
   console.error(`savedata: ${savedata}`);
@@ -194,7 +213,8 @@ async function waitFor(session, target, timeoutMs) {
       if (target === 'port') return { reached: 'port', port: s.port, elapsedMs: Date.now() - t0 };
       const st = await tryStatus(s);
       if (st) {
-        const summary = `${st.programState} longEvent=${st.anyLongEvent} ticks=${st.ticksGame} errors=${st.errors}`;
+        const evTxt = st.longEventText ? `(${st.longEventText})` : '';
+        const summary = `${st.programState} longEvent=${st.anyLongEvent}${evTxt} ticks=${st.ticksGame} errors=${st.errors}`;
         if (summary !== lastState) { console.error(`[${((Date.now() - t0) / 1000).toFixed(1)}s] ${summary}`); lastState = summary; }
         if (target === 'menu' && st.playDataLoaded && !st.anyLongEvent) return { reached: 'menu', status: st, elapsedMs: Date.now() - t0 };
         if (target === 'playing' && st.programState === 'Playing' && !st.anyLongEvent && st.mapCount > 0) return { reached: 'playing', status: st, elapsedMs: Date.now() - t0 };
@@ -304,7 +324,9 @@ async function main() {
     }
     default: {
       const name = cmd.replace(/-/g, '_');
-      const r = await call(session, name, kvArgs(pos, opts), timeoutMs);
+      const args = kvArgs(pos, opts);
+      if (name === 'screenshot' && args.path) args.path = path.resolve(String(args.path));
+      const r = await call(session, name, args, timeoutMs);
       if (opts.raw) return print(r);
       if (!r.ok) { console.error(`error (${r.type}): ${r.error}`); if (r.stack) console.error(r.stack); process.exitCode = 1; return; }
       return print(r.result);

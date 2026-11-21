@@ -204,15 +204,65 @@ namespace RimTestHarness
             }
             if (deep && t is ThingWithComps twc2)
             {
+                d["drawerType"] = t.def?.drawerType.ToString();
+                var dp = t.DrawPos;
+                var tc = t.TrueCenter();
+                d["drawPos"] = new { x = dp.x, y = dp.y, z = dp.z };
+                d["trueCenter"] = new { x = tc.x, y = tc.y, z = tc.z };
+                if (t.Graphic != null)
+                {
+                    var go = t.Graphic.DrawOffset(t.Rotation);
+                    d["graphicDrawOffset"] = new { x = go.x, y = go.y, z = go.z };
+                    d["graphicDrawSize"] = new { x = t.Graphic.drawSize.x, y = t.Graphic.drawSize.y };
+                }
                 var comps = new Dictionary<string, object>();
+                var compState = new Dictionary<string, object>();
                 foreach (var c in twc2.AllComps)
                 {
                     try { var s = c.CompInspectStringExtra(); if (!string.IsNullOrEmpty(s)) comps[c.GetType().Name] = s; } catch { }
+                    var ct = c.GetType();
+                    if (ct.Namespace != null && !ct.Namespace.StartsWith("Verse") && !ct.Namespace.StartsWith("RimWorld"))
+                    {
+                        var fields = new Dictionary<string, object>();
+                        foreach (var f in ct.GetFields(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic))
+                        {
+                            try
+                            {
+                                var val = f.GetValue(c);
+                                fields[f.Name] = FormatReflectVal(val);
+                            }
+                            catch { }
+                        }
+                        foreach (var prop in ct.GetProperties(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.DeclaredOnly))
+                        {
+                            if (prop.GetIndexParameters().Length > 0) continue;
+                            try
+                            {
+                                var val = prop.GetValue(c);
+                                fields[prop.Name] = FormatReflectVal(val);
+                            }
+                            catch { }
+                        }
+                        compState[ct.Name] = fields;
+                    }
                 }
                 d["compInspect"] = comps;
+                if (compState.Count > 0) d["compState"] = compState;
                 try { d["inspect"] = t.GetInspectString(); } catch { }
             }
             return d;
+        }
+
+        static object FormatReflectVal(object val)
+        {
+            if (val == null) return null;
+            if (val is bool || val is int || val is long || val is float || val is double || val is string) return val;
+            if (val is Vector2 v2) return new { x = v2.x, y = v2.y };
+            if (val is Vector3 v3) return new { x = v3.x, y = v3.y, z = v3.z };
+            if (val is Thing th) return new { id = th.thingIDNumber, def = th.def?.defName, pos = Cell(th.Position) };
+            if (val is Verse.Def df) return df.defName;
+            if (val is Material mat) return new { name = mat.name, shader = mat.shader?.name, mainTexture = mat.mainTexture?.name };
+            return val.ToString();
         }
 
         // ------------------------------------------------------------------ registration
@@ -231,6 +281,7 @@ namespace RimTestHarness
                     scene = SceneManager.GetActiveScene().name,
                     anyLongEvent = LongEventHandler.AnyEventNowOrWaiting,
                     longEventText = LongEventHandler.AnyEventNowOrWaiting ? SafeLongEventText() : null,
+                    longEventDebug = LongEventHandler.AnyEventNowOrWaiting ? SafeLongEventDebug() : null,
                     playDataLoaded = PlayDataLoader.Loaded,
                     ticksGame = tm?.TicksGame ?? -1,
                     paused = tm?.Paused,
@@ -357,6 +408,20 @@ namespace RimTestHarness
                         {
                             Find.TickManager.DoSingleTick();
                             done++;
+                            // Because tick pauses TickManager (TickRateMultiplier == 0), PawnTweener.PreDrawPosCalculation
+                            // would otherwise spring-lerp with factor 0 and leave walking pawns' DrawPos frozen at their spawn cell.
+                            if (Find.Maps != null)
+                            {
+                                foreach (var m in Find.Maps)
+                                {
+                                    var pawns = m?.mapPawns?.AllPawnsSpawned;
+                                    if (pawns == null) continue;
+                                    for (int i = 0; i < pawns.Count; i++)
+                                    {
+                                        try { pawns[i]?.Drawer?.tweener?.ResetTweenedPosToRoot(); } catch { }
+                                    }
+                                }
+                            }
                             if (sw.ElapsedMilliseconds - frameStart > budget) break;
                         }
                         return done >= n;
@@ -657,10 +722,76 @@ namespace RimTestHarness
 
             Register("screenshot", "Capture the window to a PNG (windowed runs only; headless has no framebuffer). args: path", a =>
             {
-                var path = a.Req("path");
+                var rawPath = a.Req("path");
                 if (GenCommandLine.CommandLineArgPassed("Headless")) throw new CommandException("running headless: no framebuffer to capture");
-                ScreenCapture.CaptureScreenshot(path);
-                return new { requested = path, note = "written asynchronously at end of frame" };
+                var fullPath = System.IO.Path.IsPathRooted(rawPath)
+                    ? System.IO.Path.GetFullPath(rawPath)
+                    : System.IO.Path.GetFullPath(System.IO.Path.Combine(GenFilePaths.SaveDataFolderPath, rawPath));
+                var dir = System.IO.Path.GetDirectoryName(fullPath);
+                if (!string.IsNullOrEmpty(dir)) System.IO.Directory.CreateDirectory(dir);
+                if (System.IO.File.Exists(fullPath)) { try { System.IO.File.Delete(fullPath); } catch { } }
+                ScreenCapture.CaptureScreenshot(fullPath);
+                var sw = Stopwatch.StartNew();
+                int frames = 0;
+                return new Stepped
+                {
+                    Step = () =>
+                    {
+                        frames++;
+                        if (frames < 2) return false;
+                        if (System.IO.File.Exists(fullPath))
+                        {
+                            try { if (new System.IO.FileInfo(fullPath).Length > 0) return true; } catch { }
+                        }
+                        return sw.ElapsedMilliseconds > 3000;
+                    },
+                    Result = () =>
+                    {
+                        var fi = new System.IO.FileInfo(fullPath);
+                        return new { path = fullPath, written = fi.Exists && fi.Length > 0, bytes = fi.Exists ? fi.Length : 0, frames, elapsedMs = sw.ElapsedMilliseconds };
+                    },
+                };
+            });
+
+            Register("camera", "Move and/or zoom the map camera. args: id (thing to center on) | x+z, size (rootSize zoom, e.g. 6..24), dX (0), dZ (0)", a =>
+            {
+                var cam = Find.CameraDriver ?? throw new CommandException("no CameraDriver active");
+                Vector3 pos;
+                if (a.Has("id"))
+                {
+                    var t = ReqThing(a, "id");
+                    pos = t.DrawPos;
+                }
+                else if (a.Has("x") && a.Has("z"))
+                {
+                    var map = MapArg(a);
+                    var c = CellArg(a, map);
+                    pos = c.ToVector3Shifted();
+                }
+                else
+                {
+                    pos = cam.MapPosition.ToVector3Shifted();
+                }
+                pos.x += a.Float("dX", 0f);
+                pos.z += a.Float("dZ", 0f);
+                float size = a.Float("size", 14f);
+                cam.SetRootPosAndSize(pos, size);
+                try { HarmonyLib.AccessTools.Method(typeof(CameraDriver), "ApplyPositionToGameObject")?.Invoke(cam, null); } catch { }
+                return new { x = pos.x, z = pos.z, size, cell = Cell(cam.MapPosition) };
+            });
+
+            Register("select", "Select or deselect a thing on the map. args: id, clear (true), jump (false)", a =>
+            {
+                var sel = Find.Selector ?? throw new CommandException("no Selector active");
+                if (a.Bool("clear", true)) sel.ClearSelection();
+                Thing t = null;
+                if (a.Has("id"))
+                {
+                    t = ReqThing(a, "id");
+                    sel.Select(t, playSound: false, forceDesignatorDeselect: true);
+                    if (a.Bool("jump", false)) CameraJumper.TryJump(t);
+                }
+                return new { selectedCount = sel.NumSelected, selectedId = t?.thingIDNumber, def = t?.def?.defName };
             });
 
             TurretCommands.RegisterAll();
@@ -717,7 +848,7 @@ namespace RimTestHarness
         }
 
         // The always-present windows (e.g. the play scene's own UI) are not closed by close=all.
-        static bool IsClosableWindow(Window w) => w is FloatMenu || w is Dialog_DebugOptionLister || w.forcePause || w.absorbInputAroundWindow || w.closeOnClickedOutside;
+        static bool IsClosableWindow(Window w) => w is FloatMenu || w is Dialog_DebugOptionLister || w is EditWindow_Log || w.preventCameraMotion || w.forcePause || w.absorbInputAroundWindow || w.closeOnClickedOutside;
 
         static object WindowSummary(Window w, int index)
         {
@@ -756,6 +887,38 @@ namespace RimTestHarness
         static readonly FieldInfo AccessToolsChildGetter = typeof(DebugActionNode).GetField("childGetter", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
 
         static string SafeLongEventText() { try { var ev = HarmonyLib.AccessTools.Field(typeof(LongEventHandler), "currentEvent")?.GetValue(null); return ev == null ? null : HarmonyLib.Traverse.Create(ev).Field("eventTextKey").GetValue<string>(); } catch { return null; } }
+        static object SafeLongEventDebug()
+        {
+            try
+            {
+                var t = typeof(LongEventHandler);
+                var ev = HarmonyLib.AccessTools.Field(t, "currentEvent")?.GetValue(null);
+                var q = HarmonyLib.AccessTools.Field(t, "eventQueue")?.GetValue(null) as System.Collections.ICollection;
+                var th = HarmonyLib.AccessTools.Field(t, "eventThread")?.GetValue(null) as System.Threading.Thread;
+                var op = HarmonyLib.AccessTools.Field(t, "levelLoadOp")?.GetValue(null) as AsyncOperation;
+                if (ev == null) return new { currentEvent = (object)null, queueCount = q?.Count ?? -1 };
+                var tr = HarmonyLib.Traverse.Create(ev);
+                var act = tr.Field("eventAction").GetValue<Action>();
+                var en = tr.Field("eventActionEnumerator").GetValue<System.Collections.IEnumerator>();
+                return new
+                {
+                    eventTextKey = tr.Field("eventTextKey").GetValue<string>(),
+                    eventText = tr.Field("eventText").GetValue<string>(),
+                    levelToLoad = tr.Field("levelToLoad").GetValue<string>(),
+                    doAsynchronously = tr.Field("doAsynchronously").GetValue<bool>(),
+                    alreadyDisplayed = tr.Field("alreadyDisplayed").GetValue<bool>(),
+                    canEverUseStandardWindow = tr.Field("canEverUseStandardWindow").GetValue<bool>(),
+                    shouldWaitUntilDisplayed = tr.Property("ShouldWaitUntilDisplayed").GetValue<bool>(),
+                    useStandardWindow = tr.Property("UseStandardWindow").GetValue<bool>(),
+                    actionMethod = act != null ? $"{act.Method.DeclaringType?.FullName}.{act.Method.Name}" : null,
+                    enumeratorType = en?.GetType().FullName,
+                    threadAlive = th?.IsAlive,
+                    levelLoadOpDone = op?.isDone,
+                    queueCount = q?.Count ?? -1,
+                };
+            }
+            catch (Exception ex) { return new { error = ex.Message }; }
+        }
         static bool? SafeWindowsForcePause() { try { return Find.WindowStack?.WindowsForcePause; } catch { return null; } }
         static List<string> SafeWindowTypes() { try { return Find.WindowStack?.Windows.Select(w => w.GetType().Name).ToList(); } catch { return null; } }
         static string SafeLogPath() { try { return Application.consoleLogPath; } catch { return null; } }

@@ -2,6 +2,7 @@ using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Tasks;
 using HarmonyLib;
@@ -68,6 +69,10 @@ namespace RimTestHarness
             try
             {
                 if (MainThreadId < 0) MainThreadId = Thread.CurrentThread.ManagedThreadId;
+                if (!UnityEngine.Application.runInBackground)
+                {
+                    try { Prefs.RunInBackground = true; UnityEngine.Application.runInBackground = true; } catch { }
+                }
                 FrameCount++;
 
                 while (queue.TryDequeue(out var job))

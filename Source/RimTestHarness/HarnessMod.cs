@@ -1,6 +1,7 @@
 using System;
 using System.IO;
 using HarmonyLib;
+using UnityEngine;
 using Verse;
 
 namespace RimTestHarness
@@ -25,6 +26,7 @@ namespace RimTestHarness
             ModRoot = content.RootDir;
             try
             {
+                try { Prefs.RunInBackground = true; Application.runInBackground = true; } catch { }
                 Harmony = new Harmony("rimtestharness.harness");
                 LogCapture.Install();
                 MainThread.Install(Harmony);

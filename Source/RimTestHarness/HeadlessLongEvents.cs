@@ -31,9 +31,13 @@ namespace RimTestHarness
         static PropertyInfo shouldWaitProp;
         static FieldInfo eventTextKeyField;
 
+        public static bool IsHeadless;
+        static object lastWaitingEvent;
+        static int waitingFrames;
+
         public static void TryInstall(Harmony harmony)
         {
-            if (!GenCommandLine.CommandLineArgPassed("Headless")) return;
+            IsHeadless = GenCommandLine.CommandLineArgPassed("Headless");
             currentEventField = AccessTools.Field(typeof(LongEventHandler), "currentEvent");
             var evType = AccessTools.Inner(typeof(LongEventHandler), "QueuedLongEvent");
             alreadyDisplayedField = evType == null ? null : AccessTools.Field(evType, "alreadyDisplayed");
@@ -50,15 +54,40 @@ namespace RimTestHarness
         }
 
         // Runs every frame; AnyEventNowOrWaiting is a cheap static check, reflection only while an event exists.
+        // Headless releases immediately; windowed gives OnGUI a couple of frames to draw the loading box first, then
+        // releases if OnGUI did not repaint (e.g. hidden/minimized/unfocused window on Windows).
         static void Prefix()
         {
             try
             {
-                if (!LongEventHandler.AnyEventNowOrWaiting) return;
+                if (!LongEventHandler.AnyEventNowOrWaiting)
+                {
+                    lastWaitingEvent = null;
+                    waitingFrames = 0;
+                    return;
+                }
                 var ev = currentEventField.GetValue(null);
                 // Only events that would otherwise block (alreadyDisplayed is read nowhere else).
-                if (ev == null || !(bool)shouldWaitProp.GetValue(ev)) return;
+                if (ev == null || !(bool)shouldWaitProp.GetValue(ev))
+                {
+                    lastWaitingEvent = null;
+                    waitingFrames = 0;
+                    return;
+                }
+                if (!IsHeadless)
+                {
+                    if (!ReferenceEquals(ev, lastWaitingEvent))
+                    {
+                        lastWaitingEvent = ev;
+                        waitingFrames = 1;
+                        return;
+                    }
+                    waitingFrames++;
+                    if (waitingFrames < 3) return;
+                }
                 alreadyDisplayedField.SetValue(ev, true);
+                lastWaitingEvent = null;
+                waitingFrames = 0;
                 Released++;
                 LastReleased = eventTextKeyField?.GetValue(ev) as string;
             }
